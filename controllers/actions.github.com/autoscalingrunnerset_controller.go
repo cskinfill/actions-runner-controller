@@ -129,6 +129,7 @@ func (r *AutoscalingRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		log.Info("Successfully removed finalizer after cleanup")
+		return ctrl.Result{}, nil
 	}
 
 	if !controllerutil.ContainsFinalizer(autoscalingRunnerSet, autoscalingRunnerSetFinalizerName) {
@@ -372,7 +373,10 @@ func (r *AutoscalingRunnerSetReconciler) createRunnerScaleSet(ctx context.Contex
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Updated with runner scale set ID, name and runner group name as an annotation")
+	logger.Info("Updated with runner scale set ID, name and runner group name as an annotation",
+		"id", runnerScaleSet.Id,
+		"name", runnerScaleSet.Name,
+		"runnerGroupName", runnerScaleSet.RunnerGroupName)
 	return ctrl.Result{}, nil
 }
 

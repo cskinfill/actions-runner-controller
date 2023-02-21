@@ -435,6 +435,164 @@ var _ = Describe("Test AutoScalingRunnerSet controller", func() {
 	})
 })
 
+var _ = Describe("Test AutoScalingController updates", func() {
+	Context("Creating autoscaling runner set with RunnerScaleSetName set", func() {
+		var ctx context.Context
+		var cancel context.CancelFunc
+		autoscalingNS := new(corev1.Namespace)
+		autoscalingRunnerSet := new(v1alpha1.AutoscalingRunnerSet)
+		configSecret := new(corev1.Secret)
+
+		BeforeEach(func() {
+			ctx, cancel = context.WithCancel(context.TODO())
+			autoscalingNS = &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: "testns-autoscaling" + RandStringRunes(5)},
+			}
+
+			err := k8sClient.Create(ctx, autoscalingNS)
+			Expect(err).NotTo(HaveOccurred(), "failed to create test namespace for AutoScalingRunnerSet")
+
+			configSecret = &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "github-config-secret",
+					Namespace: autoscalingNS.Name,
+				},
+				Data: map[string][]byte{
+					"github_token": []byte(autoscalingRunnerSetTestGitHubToken),
+				},
+			}
+
+			err = k8sClient.Create(ctx, configSecret)
+			Expect(err).NotTo(HaveOccurred(), "failed to create config secret")
+
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Namespace:          autoscalingNS.Name,
+				MetricsBindAddress: "0",
+			})
+			Expect(err).NotTo(HaveOccurred(), "failed to create manager")
+
+			controller := &AutoscalingRunnerSetReconciler{
+				Client:                             mgr.GetClient(),
+				Scheme:                             mgr.GetScheme(),
+				Log:                                logf.Log,
+				ControllerNamespace:                autoscalingNS.Name,
+				DefaultRunnerScaleSetListenerImage: "ghcr.io/actions/arc",
+				ActionsClient: fake.NewMultiClient(
+					fake.WithDefaultClient(
+						fake.NewFakeClient(
+							fake.WithUpdateRunnerScaleSet(
+								&actions.RunnerScaleSet{
+									Id:                 1,
+									Name:               "testset_update",
+									RunnerGroupId:      1,
+									RunnerGroupName:    "testgroup",
+									Labels:             []actions.Label{{Type: "test", Name: "test"}},
+									RunnerSetting:      actions.RunnerSetting{},
+									CreatedOn:          time.Now(),
+									RunnerJitConfigUrl: "test.test.test",
+									Statistics:         nil,
+								},
+								nil,
+							),
+						),
+						nil,
+					),
+				),
+			}
+			err = controller.SetupWithManager(mgr)
+			Expect(err).NotTo(HaveOccurred(), "failed to setup controller")
+
+			go func() {
+				defer GinkgoRecover()
+
+				err := mgr.Start(ctx)
+				Expect(err).NotTo(HaveOccurred(), "failed to start manager")
+			}()
+		})
+
+		AfterEach(func() {
+			defer cancel()
+
+			err := k8sClient.Delete(ctx, autoscalingNS)
+			Expect(err).NotTo(HaveOccurred(), "failed to delete test namespace for AutoScalingRunnerSet")
+		})
+
+		It("It should be create AutoScalingRunnerSet and has annotation for the RunnerScaleSetName", func() {
+			min := 1
+			max := 10
+			autoscalingRunnerSet = &v1alpha1.AutoscalingRunnerSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-asrs",
+					Namespace: autoscalingNS.Name,
+				},
+				Spec: v1alpha1.AutoscalingRunnerSetSpec{
+					GitHubConfigUrl:    "https://github.com/owner/repo",
+					GitHubConfigSecret: configSecret.Name,
+					MaxRunners:         &max,
+					MinRunners:         &min,
+					RunnerScaleSetName: "testset",
+					RunnerGroup:        "testgroup",
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "runner",
+									Image: "ghcr.io/actions/runner",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			err := k8sClient.Create(ctx, autoscalingRunnerSet)
+			Expect(err).NotTo(HaveOccurred(), "failed to create AutoScalingRunnerSet")
+
+			// Wait for the AutoScalingRunnerSet to be created with right annotation
+			ars := new(v1alpha1.AutoscalingRunnerSet)
+			Eventually(
+				func() (string, error) {
+					err := k8sClient.Get(ctx, client.ObjectKey{Name: autoscalingRunnerSet.Name, Namespace: autoscalingRunnerSet.Namespace}, ars)
+					if err != nil {
+						return "", err
+					}
+
+					if val, ok := ars.Annotations[runnerScaleSetNameKey]; ok {
+						return val, nil
+					}
+
+					return "", nil
+				},
+				autoscalingRunnerSetTestTimeout,
+				autoscalingRunnerSetTestInterval,
+			).Should(BeEquivalentTo(autoscalingRunnerSet.Spec.RunnerScaleSetName), "AutoScalingRunnerSet should have annotation for the RunnerScaleSetName")
+
+			update := autoscalingRunnerSet.DeepCopy()
+			update.Spec.RunnerScaleSetName = "testset_update"
+			err = k8sClient.Patch(ctx, update, client.MergeFrom(autoscalingRunnerSet))
+			Expect(err).NotTo(HaveOccurred(), "failed to update AutoScalingRunnerSet")
+
+			// Wait for the AutoScalingRunnerSet to be updated with right annotation
+			Eventually(
+				func() (string, error) {
+					err := k8sClient.Get(ctx, client.ObjectKey{Name: autoscalingRunnerSet.Name, Namespace: autoscalingRunnerSet.Namespace}, ars)
+					if err != nil {
+						return "", err
+					}
+
+					if val, ok := ars.Annotations[runnerScaleSetNameKey]; ok {
+						return val, nil
+					}
+
+					return "", nil
+				},
+				autoscalingRunnerSetTestTimeout,
+				autoscalingRunnerSetTestInterval,
+			).Should(BeEquivalentTo(update.Spec.RunnerScaleSetName), "AutoScalingRunnerSet should have a updated annotation for the RunnerScaleSetName")
+		})
+	})
+})
+
 var _ = Describe("Test AutoscalingController creation failures", func() {
 	Context("When autoscaling runner set creation fails on the client", func() {
 		var ctx context.Context
